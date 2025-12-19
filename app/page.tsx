@@ -1,0 +1,935 @@
+'use client';
+
+import React, { useEffect, useState, useRef } from 'react';
+import dynamic from 'next/dynamic';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import Header from '../components/Header';
+import Footer from '../components/Footer';
+import PredictionWidget from '../components/PredictionWidget';
+import MethStreamsIntegration from '../components/MethStreamsIntegration';
+import { useUser } from '../context/UserContext';
+
+const ReactPlayer = dynamic(() => import('react-player'), { ssr: false });
+
+// Define the interface for our Streamer data
+interface Streamer {
+  name: string;
+  slug: string;
+  viewers: number;
+  image: string;
+  thumbnail: string;
+  status: 'online' | 'offline';
+  title?: string;
+  category?: string;
+  language?: string;
+  bio?: string;
+  playback_url?: string;
+  followers?: number;
+  subscribers?: number;
+  totalViews?: number;
+}
+
+const STREAMER_SLUGS = [
+  'adinross',
+  'cheesur',
+  'iziprime',
+  'cuffem',
+  'shnaggyhose',
+  'konvy',
+  'markynextdoot',
+  'sweatergxd',
+  'xqc',
+  'jakefuture27',
+  'jollyrancherzoo',
+  '6ix9ine',
+  'quillysilly',
+];
+
+const COLLAB_SLUGS = [
+  'xqc',
+  'jakefuture27',
+  'jollyrancherzoo',
+  '6ix9ine',
+  'quillysilly',
+];
+
+export default function Home() {
+  const router = useRouter();
+  const [streamers, setStreamers] = useState<Streamer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [currentFeaturedIndex, setCurrentFeaturedIndex] = useState(0);
+  const [playbackError, setPlaybackError] = useState(false);
+  const [isMuted, setIsMuted] = useState(true); // Default to muted for better UX (browsers block autoplay audio)
+  const [volume, setVolume] = useState(0.8);
+  const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Versus Mode State
+  const [versusOpen, setVersusOpen] = useState(false);
+  const [selectedFighters, setSelectedFighters] = useState<string[]>([]);
+  const { user } = useUser();
+  const isAdmin = user?.isAdmin;
+
+  const availableFighters = [
+    { name: 'AdinRoss', slug: 'adinross', image: 'https://files.kick.com/images/user/904404/profile_image/conversion/09168fc3-77cf-4d10-a5d9-249ac0aa6dd7-fullsize.webp' },
+    { name: 'xQc', slug: 'xqc', image: 'https://files.kick.com/images/user/9519187/profile_image/conversion/1f114674-3253-48b4-b903-88849647248c-fullsize.webp' },
+    { name: 'N3on', slug: 'n3on', image: 'https://files.kick.com/images/user/3866299/profile_image/conversion/3f7e6e88-005a-464a-a64c-7c5e2d837648-fullsize.webp' }
+  ];
+
+  const handleFighterSelect = (slug: string) => {
+    if (selectedFighters.includes(slug)) {
+      setSelectedFighters((prev: string[]) => prev.filter(s => s !== slug));
+    } else {
+      if (selectedFighters.length < 2) {
+        setSelectedFighters((prev: string[]) => [...prev, slug]);
+      }
+    }
+  };
+
+  const startBattle = () => {
+    if (selectedFighters.length === 2) {
+      const [p1, p2] = selectedFighters;
+      router.push(`/versus?p1=${p1}&p2=${p2}`);
+    }
+  };
+
+  useEffect(() => {
+    const fetchStreamers = async () => {
+      const promises = STREAMER_SLUGS.map(async (slug) => {
+        try {
+          // Use internal API to avoid CORS issues
+          const res = await fetch(`/api/kick/${slug}`);
+
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+
+          const data = await res.json();
+
+          // Validate that we got actual data
+          if (!data || !data.user) {
+            throw new Error('Invalid data structure');
+          }
+
+          return parseStreamerData(data, slug);
+        } catch (error) {
+          console.warn(`Fetch failed for ${slug} (displaying as offline)`);
+          return {
+            name: slug,
+            slug: slug,
+            viewers: 0,
+            image: `https://ui-avatars.com/api/?name=${slug}&background=53FC18&color=000&size=300`,
+            thumbnail: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&h=450&fit=crop',
+            status: 'offline' as 'online' | 'offline',
+            title: 'Offline',
+            category: 'Offline',
+          };
+        }
+      });
+
+      const results = await Promise.all(promises);
+      setStreamers(results);
+      setLoading(false);
+    };
+
+    fetchStreamers();
+    const interval = setInterval(fetchStreamers, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const calculateYearlyViews = () => {
+    const total = streamers.reduce((acc: number, s: Streamer) => acc + (s.totalViews || 0), 0);
+    return Math.floor(total / streamers.length) || 0;
+  };
+
+  // Helper function to parse streamer data with validation
+  const parseStreamerData = (data: any, slug: string) => {
+    try {
+      const isLive = data.is_live || (data.livestream !== null && data.livestream !== undefined);
+
+      // Extract playback URL with multiple fallbacks
+      const playbackUrl = data.playback_url ||
+        data.livestream?.playback_url ||
+        data.livestream?.source ||
+        null;
+
+      // IMPORTANT: Our API normalizes to 'profile_pic'
+      const profilePic = data.user?.profile_pic ||
+        `https://ui-avatars.com/api/?name=${encodeURIComponent(slug)}&background=53FC18&color=000&size=300`;
+
+      let thumb = 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&h=450&fit=crop';
+
+      if (isLive && data.livestream?.thumbnail?.url) {
+        try {
+          thumb = data.livestream.thumbnail.url.replace('{width}', '1280').replace('{height}', '720');
+        } catch (e) {
+          console.warn('Failed to parse thumbnail URL');
+        }
+      } else if (!isLive && profilePic) {
+        thumb = 'https://images.unsplash.com/photo-1511512578047-dfb367046420?w=800&h=450&fit=crop';
+      }
+
+      // Extract stats with multiple fallbacks
+      const followersCount = data.followers_count ||
+        data.user?.followers_count ||
+        data.followersCount ||
+        0;
+
+      const subscribersCount = data.subscriber_badges?.length ||
+        data.subscribers_count ||
+        data.subscription_count ||
+        0;
+
+      const totalViews = data.user?.total_views ||
+        data.user?.views_count ||
+        data.views_count ||
+        data.total_views ||
+        0;
+
+      const viewerCount = data.viewer_count ||
+        (isLive ? (data.livestream?.viewer_count || 0) : 0);
+
+      console.log(`[PARSE] ${slug}: Live=${isLive}, Playback=${!!playbackUrl}, Viewers=${viewerCount}`);
+
+      return {
+        name: data.user?.username || data.slug || slug,
+        slug: slug,
+        viewers: viewerCount,
+        image: profilePic, // Already has fallback built in
+        thumbnail: thumb,
+        status: isLive ? 'online' : ('offline' as 'online' | 'offline'),
+        title: isLive ? (data.livestream?.session_title || 'Live Now') : 'Offline',
+        category: isLive ? (data.livestream?.categories?.[0]?.name || 'Just Chatting') : 'Just Chatting',
+        language: data.livestream?.language || 'English',
+        bio: data.user?.bio || '',
+        playback_url: playbackUrl,
+        followers: followersCount,
+        subscribers: subscribersCount,
+        totalViews: totalViews,
+      };
+    } catch (error) {
+      console.error('Error parsing streamer data:', error);
+      // Return safe fallback if parsing fails
+      return {
+        name: slug,
+        slug: slug,
+        viewers: 0,
+        image: `https://ui-avatars.com/api/?name=${slug}&background=53FC18&color=000&size=300`,
+        thumbnail: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&h=450&fit=crop',
+        status: 'offline' as 'online' | 'offline',
+        title: 'Offline',
+        category: 'Offline',
+        language: 'English',
+        bio: '',
+        playback_url: null,
+        followers: 0,
+        subscribers: 0,
+        totalViews: 0,
+      };
+    }
+  };
+
+  // Reset error when featured streamer changes
+  useEffect(() => {
+    setPlaybackError(false);
+  }, [currentFeaturedIndex]);
+
+  // Filter streamers: exclude COLLAB_SLUGS from main grids
+  const onlineStreamers = streamers.filter((s) =>
+    s.status === 'online' && !COLLAB_SLUGS.includes(s.slug.toLowerCase())
+  );
+  const offlineStreamers = streamers.filter((s) =>
+    s.status === 'offline' && !COLLAB_SLUGS.includes(s.slug.toLowerCase())
+  );
+
+  // Carousel Logic - always use ALL online streamers (including collabs) if available
+  const featuredStreamers = streamers.filter((s) => s.status === 'online').length > 0
+    ? streamers.filter((s) => s.status === 'online')
+    : streamers.slice(0, 5);
+
+  const nextCarousel = () => {
+    if (featuredStreamers.length === 0) return;
+    setCurrentFeaturedIndex((prev: number) => (prev + 1) % featuredStreamers.length);
+  };
+  const prevCarousel = () => {
+    if (featuredStreamers.length === 0) return;
+    setCurrentFeaturedIndex((prev: number) => (prev - 1 + featuredStreamers.length) % featuredStreamers.length);
+  };
+
+  const featured = featuredStreamers[currentFeaturedIndex];
+
+
+  return (
+    <>
+      <Header />
+
+      <div className="bg-[#1A1C1D] z-[200] fixed inset-0 w-full h-full pointer-events-none select-none duration-1000 opacity-100" style={{ opacity: 0 }}></div>
+
+      <div style={{ textAlign: 'center', margin: '4rem 0 2rem' }}>
+        <h1 style={{
+          fontFamily: "'Inter', sans-serif",
+          fontWeight: '900',
+          fontSize: '3.5rem',
+          textTransform: 'uppercase',
+          letterSpacing: '2px',
+          margin: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '15px'
+        }}>
+          WATCH SSB
+          <svg className="star star-right" width="21" height="21" viewBox="0 0 21 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M10.5 0L10.9982 6.54715C11.1387 8.39378 12.6062 9.86131 14.4529 10.0018L21 10.5L14.4528 10.9982C12.6062 11.1387 11.1387 12.6062 10.9982 14.4529L10.5 21L10.0018 14.4528C9.86131 12.6062 8.39378 11.1387 6.54715 10.9982L0 10.5L6.54715 10.0018C8.39378 9.86131 9.86131 8.39378 10.0018 6.54715L10.5 0Z" fill="#53FC18"></path>
+          </svg>
+        </h1>
+      </div>
+
+      {/* FEATURED CAROUSEL (STACKED) */}
+      <div className="container" style={{ marginBottom: '2rem', marginTop: '2rem', perspective: '1000px' }}>
+        {featuredStreamers.length > 0 && (
+          <div style={{ position: 'relative', height: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {/* Render all featured streamers but style them based on position */}
+            {featuredStreamers.map((streamer: Streamer, index: number) => {
+              // Calculate offset from current index
+              let offset = index - currentFeaturedIndex;
+
+              // Handle wrapping correctly for infinite loop visual
+              if (offset > featuredStreamers.length / 2) offset -= featuredStreamers.length;
+              if (offset < -featuredStreamers.length / 2) offset += featuredStreamers.length;
+
+              // Only show items close to center to save resources, but keep DOM lightweight
+              if (Math.abs(offset) > 2) return null; // Hide far items
+
+              const isCenter = offset === 0;
+              const isLeft = offset < 0;
+              const isRight = offset > 0;
+
+              // Styles for Stacked Effect
+              const zIndex = isCenter ? 20 : 10 - Math.abs(offset);
+              const scale = isCenter ? 1 : 0.85;
+              const translateX = isCenter ? '0%' : (isLeft ? '-15%' : '15%');
+              const opacity = isCenter ? 1 : 0.4;
+              const brightness = isCenter ? 'brightness(1)' : 'brightness(0.5)';
+
+              return (
+                <div
+                  key={streamer.slug}
+                  style={{
+                    position: 'absolute',
+                    width: '100%',
+                    maxWidth: '900px',
+                    height: '450px',
+                    transition: 'all 0.5s cubic-bezier(0.25, 0.8, 0.25, 1)',
+                    transform: `translateX(${translateX}) scale(${scale})`,
+                    zIndex: zIndex,
+                    opacity: opacity,
+                    filter: brightness,
+                    background: '#0b0e0f',
+                    borderRadius: '12px',
+                    overflow: 'hidden',
+                    boxShadow: isCenter ? '0 10px 40px rgba(0,0,0,0.8)' : 'none',
+                    display: 'flex'
+                  }}
+                >
+                  {/* Left Side: Preview */}
+                  <div style={{ flex: 2, position: 'relative', backgroundColor: 'black' }} onClick={() => isCenter && router.push(`/stream/${streamer.slug}`)}>
+                    {isCenter && streamer.status === 'online' ? (
+                      <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }}>
+                        {streamer.playback_url ? (
+                          <ReactPlayer
+                            url={streamer.playback_url}
+                            playing={true}
+                            muted={isMuted}
+                            volume={volume}
+                            width="100%"
+                            height="100%"
+                            style={{ position: 'absolute', top: 0, left: 0 }}
+                            config={{
+                              file: {
+                                forceHLS: true,
+                              }
+                            }}
+                          />
+                        ) : (
+                          <iframe
+                            src={`https://player.kick.com/${streamer.slug}?muted=${isMuted}&autoplay=true`}
+                            style={{ width: '100%', height: '100%', border: 'none', pointerEvents: isCenter ? 'auto' : 'none' }}
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            title={`${streamer.name} Live Preview`}
+                          />
+                        )}
+
+                        {/* Controls Container */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: '20px',
+                            right: '20px',
+                            zIndex: 40,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            gap: '10px',
+                            pointerEvents: 'auto'
+                          }}
+                          onMouseEnter={() => setShowVolumeSlider(true)}
+                          onMouseLeave={() => setShowVolumeSlider(false)}
+                        >
+                          {/* Volume Slider */}
+                          <div style={{
+                            height: showVolumeSlider ? '120px' : '0',
+                            width: '45px',
+                            background: 'rgba(0,0,0,0.85)',
+                            borderRadius: '12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: showVolumeSlider ? '15px 0' : '0',
+                            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                            opacity: showVolumeSlider ? 1 : 0,
+                            overflow: 'hidden',
+                            backdropFilter: 'blur(5px)',
+                            border: '1px solid rgba(83, 252, 24, 0.4)',
+                            boxShadow: '0 4px 15px rgba(0,0,0,0.5)'
+                          }}>
+                            <input
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                              value={volume}
+                              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                const newVol = parseFloat(e.target.value);
+                                setVolume(newVol);
+                                if (newVol > 0 && isMuted) setIsMuted(false);
+                                if (newVol === 0) setIsMuted(true);
+                              }}
+                              style={{
+                                appearance: 'none',
+                                WebkitAppearance: 'none',
+                                width: '90px',
+                                height: '4px',
+                              }}
+                            />
+                          </div>
+
+                          {/* Mute Toggle */}
+                          <div
+                            onClick={(e: React.MouseEvent) => {
+                              e.stopPropagation();
+                              setIsMuted(!isMuted);
+                            }}
+                            style={{
+                              background: isMuted ? 'rgba(0,0,0,0.8)' : 'rgba(83, 252, 24, 0.9)',
+                              color: isMuted ? '#53FC18' : 'black',
+                              width: '45px',
+                              height: '45px',
+                              borderRadius: '12px',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              border: '1px solid #53FC18',
+                              boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
+                              transition: 'all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+                            }}
+                            onMouseEnter={(e: React.MouseEvent<HTMLDivElement>) => {
+                              e.currentTarget.style.transform = 'scale(1.1)';
+                            }}
+                            onMouseLeave={(e: React.MouseEvent<HTMLDivElement>) => {
+                              e.currentTarget.style.transform = 'scale(1)';
+                            }}
+                          >
+                            {isMuted || volume === 0 ? (
+                              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M11 5L6 9H2V15H6L11 19V5Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M23 9L17 15" stroke={isMuted ? "#ff4444" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M17 9L23 15" stroke={isMuted ? "#ff4444" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            ) : (
+                              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M11 5L6 9H2V15H6L11 19V5Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M19.07 4.93C20.9447 6.80527 21.9979 9.34836 21.9979 12C21.9979 14.6516 20.9447 17.1947 19.07 19.07" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M15.54 8.46C15.54 8.46 16.5 9.5 16.5 12C16.5 14.5 15.54 15.54 15.54 15.54" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <img src={streamer.thumbnail} alt={streamer.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    )}
+
+                    {/* Live Badge */}
+                    {streamer.status === 'online' && (
+                      <div style={{ position: 'absolute', top: '15px', left: '15px', background: '#53FC18', color: 'black', padding: '4px 10px', borderRadius: '4px', fontWeight: 'bold', fontSize: '0.8rem', zIndex: 20 }}>LIVE</div>
+                    )}
+
+                    {/* Overlay for Click (if not center iframe) */}
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10, cursor: 'pointer' }} onClick={() => {
+                      if (isCenter) router.push(`/stream/${streamer.slug}`);
+                      else if (isLeft) prevCarousel();
+                      else if (isRight) nextCarousel();
+                    }}></div>
+                  </div>
+
+                  {/* Right Side: Details */}
+                  <div style={{ flex: 1, backgroundColor: '#14171a', borderLeft: '1px solid #333', padding: '20px', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', marginBottom: '15px' }}>
+                      <img src={streamer.image} alt="Avatar" style={{ width: '50px', height: '50px', borderRadius: '50%', border: '2px solid #53FC18', marginRight: '15px' }} />
+                      <div>
+                        <h2 style={{ margin: 0, fontSize: '1.2rem', color: 'white' }}>{streamer.name}</h2>
+                        <span style={{ color: '#53FC18' }}>{streamer.viewers.toLocaleString()} viewers</span>
+                      </div>
+                    </div>
+                    <div style={{ background: '#24272c', padding: '8px 12px', borderRadius: '6px', width: 'fit-content', marginBottom: '15px', color: '#ccc', fontSize: '0.9rem' }}>
+                      {streamer.language}
+                    </div>
+                    <p style={{ color: '#aaa', fontSize: '0.9rem', lineHeight: '1.4' }}>
+                      {streamer.title}
+                    </p>
+
+                  </div>
+
+                </div>
+              );
+            })}
+
+            {/* Controls */}
+            <button
+              onClick={prevCarousel}
+              style={{ position: 'absolute', left: '20px', top: '50%', transform: 'translateY(-50%)', zIndex: 50, background: 'rgba(0,0,0,0.5)', border: 'none', color: 'white', padding: '15px', borderRadius: '50%', cursor: 'pointer' }}
+              className="hover:bg-green-500 hover:text-black transition-colors"
+            >
+              &lt;
+            </button>
+            <button
+              onClick={nextCarousel}
+              style={{ position: 'absolute', right: '20px', top: '50%', transform: 'translateY(-50%)', zIndex: 50, background: 'rgba(0,0,0,0.5)', border: 'none', color: 'white', padding: '15px', borderRadius: '50%', cursor: 'pointer' }}
+              className="hover:bg-green-500 hover:text-black transition-colors"
+            >
+              &gt;
+            </button>
+
+          </div>
+        )}
+      </div>
+
+      <div id="main" className="main--fullfeatured container">
+        {/* ONLINE STREAMERS SECTION */}
+        <div className="streamer-title streamer-on">
+          <div className="pulsating-circle">
+            <div className="circle circle-pulse" style={{ backgroundColor: '#53FC18' }}></div>
+            <div className="circle" style={{ backgroundColor: '#53FC18' }}></div>
+          </div>
+          <span>{loading ? '...' : onlineStreamers.length} Online Now</span>
+        </div>
+
+        <div className="panel-grid">
+          {loading ? (
+            <div style={{ color: 'white', padding: '20px' }}>Loading Live Status...</div>
+          ) : (
+            onlineStreamers.length > 0 ? onlineStreamers.map((streamer: Streamer) => (
+              <Link href={`/stream/${streamer.slug}`} key={streamer.slug} style={{ textDecoration: 'none', color: 'inherit' }}>
+                <div className="streamer-panel true watched">
+                  <div className="streamer__image">
+                    <img className="streamer__image__inner" src={streamer.image} alt={streamer.name} />
+                    <div className="streamer__active" style={{ borderColor: '#53FC18' }}></div>
+                  </div>
+                  <div className="streamer__info">
+                    <span className="streamer__name">{streamer.name}</span>
+                    <span className="streamer__viewers">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M8 9.5C8.39782 9.5 8.77936 9.34196 9.06066 9.06066C9.34196 8.77936 9.5 8.39782 9.5 8C9.5 7.60218 9.34196 7.22064 9.06066 6.93934C8.77936 6.65804 8.39782 6.5 8 6.5C7.60218 6.5 7.22064 6.65804 6.93934 6.93934C6.65804 7.22064 6.5 7.60218 6.5 8C6.5 8.39782 6.65804 8.77936 6.93934 9.06066C7.22064 9.34196 7.60218 9.5 8 9.5Z" fill="#53FC18"></path>
+                        <path fillRule="evenodd" clipRule="evenodd" d="M1.37996 8.27987C1.31687 8.09648 1.31687 7.89727 1.37996 7.71387C1.85633 6.33724 2.75014 5.14343 3.93692 4.29869C5.1237 3.45394 6.54437 3.00032 8.00109 3.00098C9.45782 3.00164 10.8781 3.45655 12.0641 4.30237C13.2501 5.14819 14.1428 6.34281 14.618 7.71987C14.681 7.90327 14.681 8.10248 14.618 8.28587C14.1418 9.66286 13.248 10.857 12.0611 11.7021C10.8742 12.5471 9.4533 13.0009 7.99632 13.0002C6.53934 12.9996 5.11883 12.5445 3.9327 11.6984C2.74657 10.8523 1.85387 9.65729 1.37896 8.27987H1.37996ZM11 7.99987C11 8.79552 10.6839 9.55859 10.1213 10.1212C9.55867 10.6838 8.79561 10.9999 7.99996 10.9999C7.20431 10.9999 6.44125 10.6838 5.87864 10.1212C5.31603 9.55859 4.99996 8.79552 4.99996 7.99987C4.99996 7.20422 5.31603 6.44116 5.87864 5.87855C6.44125 5.31594 7.20431 4.99987 7.99996 4.99987C8.79561 4.99987 9.55867 5.31594 10.1213 5.87855C10.6839 6.44116 11 7.20422 11 7.99987Z" fill="#53FC18"></path>
+                      </svg>
+                      {streamer.viewers.toLocaleString()}
+                      tap to watch
+                    </span>
+                  </div>
+                </div>
+              </Link>
+            )) : <div style={{ color: '#888', padding: '10px' }}>No streamers are currently live.</div>
+          )}
+        </div>
+
+        {/* OFFLINE STREAMERS SECTION */}
+        <div className="streamer-title streamer-off">
+          <div className="pulsating-circle">
+            <div className="circle circle-gray"></div>
+          </div>
+          <span>Offline Streamers</span>
+        </div>
+
+        <div className="panel-grid">
+          {offlineStreamers.map((streamer: Streamer) => (
+            <Link href={`/stream/${streamer.slug}`} key={streamer.slug} style={{ textDecoration: 'none', color: 'inherit' }}>
+              <div className="streamer-panel false">
+                <div className="streamer__image">
+                  {/* Grayscale filter for offline */}
+                  <img className="streamer__image__inner" src={streamer.image} alt={streamer.name} style={{ filter: 'grayscale(100%)' }} />
+                </div>
+                <div className="streamer__info">
+                  <span className="streamer__name">{streamer.name}</span>
+                  <span className="streamer__viewers">Offline</span>
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+
+        {/* MethStreams Integration Section */}
+        <div style={{ marginTop: '4rem', marginBottom: '4rem' }}>
+          <MethStreamsIntegration defaultStatus="live" />
+        </div>
+      </div>
+
+      <Footer />
+
+      {/* Others Sidebar */}
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          right: 0,
+          height: '100%',
+          zIndex: 9999,
+          display: 'flex',
+          alignItems: 'center',
+          transform: sidebarOpen ? 'translateX(0)' : 'translateX(calc(100% - 40px))',
+          transition: 'transform 0.3s ease-in-out'
+        }}
+      >
+        {/* Toggle Tab */}
+        <div
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          style={{
+            width: '40px',
+            height: '120px',
+            background: '#53FC18',
+            borderTopLeftRadius: '10px',
+            borderBottomLeftRadius: '10px',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '-2px 0 10px rgba(0,0,0,0.5)'
+          }}
+        >
+          <div style={{ transform: 'rotate(-90deg)', whiteSpace: 'nowrap', fontWeight: 'bold', color: 'black' }}>
+            OTHERS
+          </div>
+        </div>
+
+        {/* Sidebar Content */}
+        <div style={{ width: '250px', height: '100%', background: '#0b0e0f', borderLeft: '1px solid #333', padding: '20px', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
+
+          {/* Menu Section */}
+          <h3 style={{ color: 'white', marginBottom: '15px', borderBottom: '1px solid #333', paddingBottom: '10px', fontSize: '0.9rem', letterSpacing: '1px' }}>MENU</h3>
+
+          <button
+            onClick={() => router.push('/multiview')}
+            style={{
+              background: '#1f2223',
+              border: '1px solid #333',
+              color: 'white',
+              padding: '12px',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: '10px',
+              textAlign: 'left',
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              transition: 'all 0.2s'
+            }}
+            className="hover:border-[#53FC18] hover:text-[#53FC18]"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+            </svg>
+            Multi View
+          </button>
+
+          <button
+            onClick={() => setVersusOpen(true)}
+            style={{
+              background: 'linear-gradient(45deg, #1f2223, #2a0a0a)',
+              border: '1px solid #ff4444',
+              color: '#ff4444',
+              padding: '12px',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: '30px',
+              textAlign: 'left',
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              transition: 'all 0.2s'
+            }}
+            className="hover:brightness-125"
+          >
+            ⚔️ Versus Mode
+          </button>
+
+          {isAdmin && (
+            <button
+              onClick={() => router.push('/admin')}
+              style={{
+                background: 'linear-gradient(45deg, #1f2223, #1a1a1a)',
+                border: '1px solid #53FC18',
+                color: '#53FC18',
+                padding: '12px',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                marginBottom: '20px',
+                textAlign: 'left',
+                fontWeight: 'bold',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                transition: 'all 0.2s',
+                boxShadow: '0 0 10px rgba(83, 252, 24, 0.1)'
+              }}
+              className="hover:brightness-125 hover:shadow-[0_0_15px_rgba(83,252,24,0.3)]"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+              Admin Dashboard
+            </button>
+          )}
+
+          <h3 style={{ color: 'white', marginTop: '20px', marginBottom: '15px', borderBottom: '1px solid #333', paddingBottom: '10px' }}>SPORTS NETWORK</h3>
+
+          <button
+            onClick={() => router.push('/sports')}
+            style={{
+              background: 'linear-gradient(45deg, #1f2223, #0a1a10)',
+              border: '1px solid #53FC18',
+              color: '#53FC18',
+              padding: '12px',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: '20px',
+              textAlign: 'left',
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              transition: 'all 0.2s'
+            }}
+            className="hover:brightness-125"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"></path>
+              <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"></path>
+              <path d="M4 22h16"></path>
+              <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"></path>
+              <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"></path>
+              <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"></path>
+            </svg>
+            Live Sports Network
+          </button>
+
+          <button
+            onClick={() => router.push('/movies')}
+            style={{
+              background: 'linear-gradient(45deg, #1f2223, #1a0a1a)',
+              border: '1px solid #9d4edd',
+              color: '#9d4edd',
+              padding: '12px',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: '20px',
+              textAlign: 'left',
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              transition: 'all 0.2s'
+            }}
+            className="hover:brightness-125"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="7" width="20" height="15" rx="2" ry="2"></rect>
+              <polyline points="17 2 12 7 7 2"></polyline>
+            </svg>
+            Movie Theater
+          </button>
+
+          {/* Featured Collabs */}
+          <h3 style={{ color: 'white', marginBottom: '20px', borderBottom: '1px solid #333', paddingBottom: '10px' }}>FEATURED COLLABS</h3>
+
+          {COLLAB_SLUGS.map((slug) => {
+            const streamer = streamers.find(s => s.slug.toLowerCase() === slug.toLowerCase());
+            const displayName = streamer ? streamer.name : slug;
+            const profilePic = streamer ? streamer.image : 'https://images.unsplash.com/photo-1511367461989-f85a21fda167?w=100&h=100&fit=crop';
+            const isLive = streamer?.status === 'online';
+
+            return (
+              <button
+                key={slug}
+                onClick={() => router.push(`/stream/${slug}`)}
+                style={{
+                  background: isLive ? 'linear-gradient(45deg, #1f2223, #141617)' : '#1f2223',
+                  border: isLive ? '1px solid #53FC18' : '1px solid #333',
+                  color: 'white',
+                  padding: '10px',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  marginBottom: '10px',
+                  transition: 'all 0.2s',
+                  textAlign: 'left'
+                }}
+                onMouseEnter={(e: React.MouseEvent<HTMLButtonElement>) => {
+                  e.currentTarget.style.transform = 'scale(1.02)';
+                  e.currentTarget.style.borderColor = '#53FC18';
+                }}
+                onMouseLeave={(e: React.MouseEvent<HTMLButtonElement>) => {
+                  e.currentTarget.style.transform = 'scale(1)';
+                  e.currentTarget.style.borderColor = isLive ? '#53FC18' : '#333';
+                }}
+              >
+                <div style={{ position: 'relative', flexShrink: 0 }}>
+                  <img src={profilePic} alt={displayName} style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover' }} />
+                  {isLive && <div style={{ position: 'absolute', bottom: -2, right: -2, width: '10px', height: '10px', background: '#53FC18', borderRadius: '50%', border: '2px solid #1f2223' }}></div>}
+                </div>
+                <div style={{ overflow: 'hidden', minWidth: 0 }}>
+                  <div style={{ fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.9rem' }}>{displayName}</div>
+                  {isLive && <div style={{ color: '#53FC18', fontSize: '0.7rem' }}>LIVE</div>}
+                </div>
+              </button>
+            );
+          })}
+
+
+          <p style={{ color: '#888', fontSize: '0.8rem', textAlign: 'center', marginTop: '10px' }}>
+            Check out the latest Exclusive collaboration streams!
+          </p>
+        </div>
+      </div>
+
+      {/* Versus Selection Modal */}
+      {versusOpen && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          background: 'rgba(0,0,0,0.8)',
+          zIndex: 10000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backdropFilter: 'blur(5px)'
+        }} onClick={() => setVersusOpen(false)}>
+          <div style={{
+            background: '#14171a',
+            border: '2px solid #ff4444',
+            borderRadius: '16px',
+            padding: '30px',
+            width: '90%',
+            maxWidth: '600px',
+            maxHeight: '80vh',
+            overflowY: 'auto',
+            boxShadow: '0 0 50px rgba(255,0,0,0.2)'
+          }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ color: 'white', margin: '0 0 10px 0', textAlign: 'center', fontFamily: "'Impact', sans-serif", letterSpacing: '2px', fontSize: '2rem' }}>
+              <span style={{ color: '#ff4444' }}>⚔️</span> SELECT LIVE FIGHTERS
+            </h2>
+            <p style={{ color: '#888', textAlign: 'center', marginBottom: '25px', fontSize: '0.9rem' }}>
+              Select 2 LIVE streamers to battle
+            </p>
+
+            {streamers.filter(s => s.status === 'online').length < 2 ? (
+              <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>
+                <div style={{ fontSize: '2rem', marginBottom: '10px' }}>😴</div>
+                Not enough streamers are live right now for a battle.<br />
+                Check back later!
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '15px', marginBottom: '25px' }}>
+                  {streamers.filter(s => s.status === 'online').map(streamer => (
+                    <div
+                      key={streamer.slug}
+                      onClick={() => handleFighterSelect(streamer.slug)}
+                      style={{
+                        cursor: 'pointer',
+                        border: selectedFighters.includes(streamer.slug) ? '2px solid #53FC18' : '2px solid #333',
+                        borderRadius: '12px',
+                        overflow: 'hidden',
+                        position: 'relative',
+                        background: '#0b0e0f',
+                        transition: 'all 0.2s',
+                        transform: selectedFighters.includes(streamer.slug) ? 'scale(1.05)' : 'scale(1)',
+                        display: 'flex',
+                        flexDirection: 'column'
+                      }}
+                    >
+                      <div style={{ position: 'relative', width: '100%', aspectRatio: '1/1' }}>
+                        <img src={streamer.image} alt={streamer.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        <div style={{
+                          position: 'absolute',
+                          top: '5px',
+                          right: '5px',
+                          background: '#ff0000',
+                          color: 'white',
+                          fontSize: '0.6rem',
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          fontWeight: 'bold'
+                        }}>LIVE</div>
+                      </div>
+                      <div style={{ padding: '8px', textAlign: 'center', fontWeight: 'bold', color: 'white', fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {streamer.name}
+                      </div>
+                      {selectedFighters.includes(streamer.slug) && (
+                        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(83, 252, 24, 0.2)', border: '2px solid #53FC18' }}></div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={startBattle}
+                  disabled={selectedFighters.length !== 2}
+                  style={{
+                    width: '100%',
+                    padding: '15px',
+                    background: selectedFighters.length === 2 ? 'linear-gradient(45deg, #53FC18, #2ea40c)' : '#333',
+                    color: selectedFighters.length === 2 ? 'black' : '#666',
+                    border: 'none',
+                    borderRadius: '8px',
+                    fontWeight: 'bold',
+                    fontSize: '1.2rem',
+                    cursor: selectedFighters.length === 2 ? 'pointer' : 'not-allowed',
+                    textTransform: 'uppercase',
+                    transition: 'all 0.2s',
+                    letterSpacing: '1px'
+                  }}
+                >
+                  Start Battle
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      <PredictionWidget streamers={streamers} />
+    </>
+  );
+}
